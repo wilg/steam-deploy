@@ -1,4 +1,14 @@
-#!/bin/sh
+#!/bin/bash
+set -euo pipefail
+IFS=$'\n\t'
+
+steamdir=${STEAM_HOME:-$HOME/Steam}
+# this is relative to the action
+contentroot=$(pwd)/$rootPath
+
+# these are temporary file we create, so in a tmpdir
+mkdir BuildOutput
+manifest_path=$(pwd)/manifest.vdf
 
 echo ""
 echo "#################################"
@@ -54,20 +64,6 @@ echo "#    Generating App Manifest    #"
 echo "#################################"
 echo ""
 
-mkdir -p BuildOutput
-
-steamdir=$STEAM_HOME
-manifest_path=$(pwd)/manifest.vdf
-contentroot=$(pwd)/$rootPath
-if [[ "$OSTYPE" = "darwin"* ]]; then
-  steamdir="$HOME/Library/Application Support/Steam"
-elif [[ "$OSTYPE" = "msys"* ]]; then
-  manifest_path=$(cygpath -w "$manifest_path")
-  contentroot=$(cygpath -w "$contentroot")
-elif [ "$RUNNER_OS" = "Linux" ]; then
-  steamdir="/home/runner/Steam"
-fi
-
 cat << EOF > "manifest.vdf"
 "appbuild"
 {
@@ -86,26 +82,63 @@ EOF
 cat manifest.vdf
 echo ""
 
+if [ -n "$steam_totp" ]; then
+  echo ""
+  echo "#################################"
+  echo "#     Using SteamGuard TOTP     #"
+  echo "#################################"
+  echo ""
+else  
+  if [ ! -n "$configVdf" ]; then
+    echo "Config VDF input is missing or incomplete! Cannot proceed."
+    exit 1
+  fi
+
+  steam_totp="INVALID"
+
+  echo ""
+  echo "#################################"
+  echo "#    Copying SteamGuard Files   #"
+  echo "#################################"
+  echo ""
+
+  echo "Steam is installed in: $steamdir"
+
+  mkdir -p "$steamdir/config"
+
+  echo "Copying $steamdir/config/config.vdf..."
+  echo "$configVdf" | base64 -d > "$steamdir/config/config.vdf"
+  chmod 777 "$steamdir/config/config.vdf"
+
+  echo "Finished Copying SteamGuard Files!"
+  echo ""
+fi
+
 echo ""
 echo "#################################"
-echo "#    Copying SteamGuard Files   #"
+echo "#        Test login             #"
 echo "#################################"
 echo ""
 
-echo "Steam is installed in: $steamdir"
+steamcmd +set_steam_guard_code "$steam_totp" +login "$steam_username" +quit;
 
-mkdir -p "$steamdir/config"
+ret=$?
+if [ $ret -eq 0 ]; then
+    echo ""
+    echo "#################################"
+    echo "#        Successful login       #"
+    echo "#################################"
+    echo ""
+else
+      echo ""
+      echo "#################################"
+      echo "#        FAILED login           #"
+      echo "#################################"
+      echo ""
+      echo "Exit code: $ret"
 
-echo "Copying $steamdir/config/config.vdf..."
-echo "$configVdf" | base64 -d > "$steamdir/config/config.vdf"
-chmod 777 "$steamdir/config/config.vdf"
-
-echo "Copying $steamdir/ssfn..."
-echo "$ssfnFileContents" | base64 -d > "$steamdir/$ssfnFileName"
-chmod 777 "$steamdir/$ssfnFileName"
-
-echo "Finished Copying SteamGuard Files!"
-echo ""
+      exit $ret
+fi
 
 echo ""
 echo "#################################"
@@ -113,7 +146,7 @@ echo "#        Uploading build        #"
 echo "#################################"
 echo ""
 
-$STEAM_CMD +login "$steam_username" "$steam_password" +run_app_build $manifest_path +quit || (
+steamcmd +login "$steam_username" +run_app_build "$manifest_path" +quit || (
     echo ""
     echo "#################################"
     echo "#             Errors            #"
@@ -123,11 +156,20 @@ $STEAM_CMD +login "$steam_username" "$steam_password" +run_app_build $manifest_p
     echo ""
     ls -alh
     echo ""
-    ls -alh $rootPath
+    ls -alh "$rootPath" || true
     echo ""
     echo "Listing logs folder:"
     echo ""
     ls -Ralph "$steamdir/logs/"
+
+    for f in "$steamdir"/logs/*; do
+      if [ -e "$f" ]; then
+        echo "######## $f"
+        cat "$f"
+        echo
+      fi
+    done
+
     echo ""
     echo "Displaying error log"
     echo ""
@@ -142,5 +184,14 @@ $STEAM_CMD +login "$steam_username" "$steam_password" +run_app_build $manifest_p
     echo "#################################"
     echo ""
     ls -Ralph BuildOutput
+
+    for f in BuildOutput/*.log; do
+      echo "######## $f"
+      cat "$f"
+      echo
+    done
+
     exit 1
   )
+
+echo "manifest=${manifest_path}" >> $GITHUB_OUTPUT
